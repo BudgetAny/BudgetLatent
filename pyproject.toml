@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "budgetlatent"
+version = "2.0.0"
+description = "BudgetLatent: FLUX.2 [klein] and FLUX 3 Image Klein text-to-image generation and editing at any token budget (unofficial, open-source)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.9",
+    "transformers>=4.57",
+    "diffusers>=0.36",
+    "huggingface_hub>=0.35",
+    "safetensors>=0.6",
+    "accelerate>=1.0",
+    "numpy",
+    "pillow",
+    "pyyaml",
+]
+# The tested, pinned environment is requirements.txt.  The trainers read configs/ from a checkout (pip install -e .).
+
+[project.optional-dependencies]
+data = ["torchvision>=0.24", "pyarrow>=20"]
+
+[tool.setuptools.packages.find]
+include = ["budgetlatent*"]

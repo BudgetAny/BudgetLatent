@@ -1,0 +1,111 @@
+# BudgetPix s8 on FLUX.2 [klein] 4B Base at 1024 x 1024, trained from the released weights: configs/flux2_512.yaml (the recipe,
+# written for 512) with the resolution-dependent entries changed, and 30,000 steps.  Needs
+# BP_GRID=64 in the environment.  Same tokens, scales, thresholds and optimiser; the
+# latent grid is 64 x 64, the budgets run from 64 to 4096 tokens, the time shift is mu(4096).  (scripts/train/train.py --init can
+# instead continue a 512 run from its checkpoint-last directory.)
+
+model:
+  family: "flux2"                 # models/flux2_trunk.Flux2Trunk, encoders/text.Qwen3Text, layout.flux2_klein_timesteps
+  flux2_base_repo: "black-forest-labs/FLUX.2-klein-base-4B"   # transformer, VAE, Qwen3-4B text encoder, tokenizer
+  chat_template: "bfl_nothink"    # BFL's template, which the released weights were trained with | "no_think"
+  resolution: 1024
+  latent_grid: [64, 64]
+  latent_channels: 128
+  text_seq_len: 512
+  text_context_dim: 7680          # Qwen3 hidden states after layers 9, 18, 27, concatenated
+
+budgetpix_s8:                     # fixed in the code: cascaded mixers / refiners, IPE v3, latent decoder, coarse-only modules
+  scales: [1, 2, 4, 8]            # 16, 32, 64, 128 px tokens -> 64 .. 4096 tokens (1.56 % .. 100 %)
+  thresholds_bits: [6.0, 4.0, 2.0]
+  entropy_bins: 512
+  mix_bottleneck: 256
+  use_ipe_2d: true
+  rope_box_damping: true
+  refine_width: 128
+  refine_depth: 2
+  refine_heads: 4
+  use_hf_skip: true               # velocity-MMSE Wiener gain: +1 at sigma = 1 (noise), 0 at 1/17, -1 at sigma = 0 (clean)
+  hf_rho: 0.25
+
+distillation:                     # stage 1: real images, the dense teacher's velocity as the target
+  data_num_steps: 50              # t is drawn through the 50-step schedule's shift, mu(4096, 50) = 2.023351
+  rollout_first_p: 0.10           # share of examples at t = 0 (pure noise), laid out from the noise itself
+  class_dropout_prob: 0.10        # caption replaced by the empty prompt, for teacher and student alike
+  anchor_p: 0.10                  # dense layout
+  uniform_coarse_p: 0.10          # one scale everywhere, s ~ U{2, 4, 8}
+  budget_p: 0.55                  # thresholds calibrated to a token target, log-uniform in budget_range; the rest: random offset
+  budget_range: [0.015625, 1.0]
+  offset_range: [-1.0, 4.0]
+  random_placement_p: 0.20        # of the budget + offset examples: a synthetic detail map instead of the image's
+  smooth_scramble_frac: 0.67      # of those: blobs and spotlight / ramp (half each); the rest i.i.d.
+  pyramid_noise_std: 0.6
+  level_jitter_std: 0.75
+  coarse_cell_boost: 0.5          # coarse cells weigh 1.5x in the loss (weights normalised to mean 1 per image)
+  loss_channel_reduction: "mean"  # mean over cells and channels, as in the reference recipe ("sum": 128x the gradient)
+
+dmd2_gan:                         # stage 2 (train_dmd.py): data-free DMD2 + GAN, captions only
+  warm_start_ema_ckpt: ""         # stage-1 EMA weights (ema-final.safetensors); empty = cold start. --init overrides it
+  dmd_sim_steps: 5
+  dmd_backward_sim_prob: 0.5      # share of steps whose rollout is the student's on layouts; else the dense teacher's
+  data_t_uniform_frac: 0.35
+  dmd_weight: 0.25
+  gan_weight: 0.015
+  d_gan_loss_weight: 0.5
+  logit_reg_weight: 1.0e-4
+  lora_rank: 16
+  lora_alpha: 16.0
+  cls_channels: 256
+  color_branch_weight: 0.5
+  min_step_frac: 0.02
+  max_step_frac: 0.98
+  use_clean_gate: true
+  gan_feature_lora_grad: false    # the discriminator's features carry no gradient to the LoRA: it stays a pure fake denoiser
+  fake_score_match_dmd: true      # the LoRA is trained at the capped times, with the t^2 weights, of the DMD term
+  ttur_updates: 2                 # critic updates per student update (5 if dmd_backward_sim_prob is 1.0)
+  critic_lr: 1.0e-4
+  critic_betas: [0.0, 0.99]
+  critic_weight_decay: 1.0e-4
+  critic_grad_clip_norm: 1.0
+  cold_start:                     # from the released model + zero-init modules
+    trunk_lr: 2.0e-5
+    adapter_lr: 1.6e-4
+    ema_decays: [0.9999]
+    ema_warmup: true
+    critic_warmup_steps: 5000
+    dmd_ramp_steps: 2000
+    max_steps: 60000
+  warm_start:                     # from stage-1 EMA weights; AdamW starts from zero moments
+    trunk_lr: 1.0e-5
+    adapter_lr: 8.0e-5
+    ema_decays: [0.9999, 0.999]
+    ema_warmup: false
+    critic_warmup_steps: 250
+    dmd_ramp_steps: 500
+    max_steps: null               # the recipe gives no length for this mode: pass --max_steps
+
+optim:
+  global_batch_size: 128          # batch_per_gpu x grad_accum x GPUs, checked at start-up
+  max_steps: 30000
+  trunk_lr: 2.0e-5
+  adapter_lr: 1.6e-4              # 8x, on scale_emb, mixers, ipe_2d, refiners
+  warmup_steps: 500               # linear from 1e-4 x the rate, then constant
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0
+  grad_clip_norm: 0.5
+  spike_guard_factor: 10.0        # skip a step whose gradient norm exceeds 10x the running mean of accepted norms
+  spike_guard_max_norm: 50.0      # ... or 50 outright, or is not finite
+  spike_guard_warmup: 50
+  ema_decay: 0.9999               # with warm-up: min(0.9999, (1 + n) / (10 + n))
+  ckpt_every: 4000                # EMA snapshot (ema-s<step>.safetensors) + the validation gallery
+
+data:
+  source_weights: {blip3o: 0.060, sharegpt4o: 0.040, dalle3: 0.016, aesthetic: 0.060}   # shares within a chunk; the
+                                  # Aesthetic-Train-V2 photos have chunks of their own (chunk_aes_*.pt, scripts/data/build_aesthetic.py),
+                                  # so their share of the stream is their share of the chunks (~47 %)
+
+inference:                        # also the periodic validation: 32 prompts x 10 budgets, seed 42
+  num_steps: 50
+  guidance_scale: 4.0
+  relayout_every: 4               # steps 0, 4, ..., 20; step 0 from the noise, later ones from decoded pixels
+  relayout_until: 20              # the layout of step 20 is kept to the end (null: refresh to step 48)

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+logs/
+runs/
+*.out
+third_party/
+weights/
+*.egg-info/
+build/
+gallery*/
+samples*/

@@ -1,0 +1,75 @@
+# BudgetPix s8 on FLUX 3 Image Klein Base at 512 x 512, stage 1 (scripts/train/train.py) from the released weights:
+# the recipe of configs/flux2_512.yaml (written for FLUX.2 [klein]) on the FLUX 3 trunk, 30,000 steps.  What changes
+# with the model: the trunk (models/flux3_trunk.py), the text features (Qwen3-VL, a window per caption), the schedule
+# (the release's constant shift 6.93 instead of FLUX.2's mu(tokens)) and the sampler defaults (guidance 3.5).
+# Same tokens, scales, thresholds, layouts, losses and optimiser.  The VAE has FLUX.2's architecture but weights of
+# its own, so the latents are encoded for FLUX 3 (scripts/data/encode_latents.py --family flux3).
+
+model:
+  family: "flux3"                 # models/flux3_trunk.Flux3Trunk, encoders/text.Qwen3VLText, layout.schedule(..., "flux3")
+  base_repo: "black-forest-labs/flux-3-image-klein-base"     # model.safetensors, text_encoder/ (Qwen3-VL-4B-Instruct), vae/
+  chat_template: "flux3"          # Qwen3-VL's template, user message + generation prompt (the release's)
+  resolution: 512
+  latent_grid: [32, 32]
+  latent_channels: 128
+  text_seq_len: 160               # text tokens budgeted per example when the student's passes are planned (windows vary:
+                                  # 80 for 76 % of the 512 mix / 87 % of the 1024 mix, 160 for 20 % / 11 %, mean ~100)
+  text_max_tokens: 640            # cap on a caption's window (a multiple of 80; the release allows 8192).  The longest of
+                                  # 28K sampled training captions is 390 tokens with the template, so none is truncated
+  text_context_dim: 20480         # Qwen3-VL hidden states after layers 4, 8, ..., 32, concatenated
+  time_shift: 6.93                # the schedule's shift: training times and the validation sampler.  The release's config.json
+                                  # and diffusers: 6.93 (guidance 3.5); BFL's GitHub code samples the base model at 16.0 (guidance 4.0)
+
+budgetpix_s8:                     # fixed in the code: cascaded mixers / refiners, IPE v3, latent decoder, coarse-only modules
+  scales: [1, 2, 4, 8]            # 16, 32, 64, 128 px tokens -> 16 .. 1024 tokens (1.56 % .. 100 %)
+  thresholds_bits: [6.0, 4.0, 2.0]
+  entropy_bins: 512
+  mix_bottleneck: 256
+  use_ipe_2d: true
+  rope_box_damping: true
+  refine_width: 128
+  refine_depth: 2
+  refine_heads: 4
+  use_hf_skip: true               # velocity-MMSE Wiener gain: +1 at sigma = 1 (noise), 0 at 1/17, -1 at sigma = 0 (clean)
+  hf_rho: 0.25
+
+distillation:                     # stage 1: real images, the dense teacher's velocity as the target
+  data_num_steps: 50              # t is drawn through the release's schedule shift: constant 6.93 at every resolution
+  rollout_first_p: 0.10           # share of examples at t = 0 (pure noise), laid out from the noise itself
+  class_dropout_prob: 0.10        # caption replaced by the empty prompt, for teacher and student alike
+  anchor_p: 0.10                  # dense layout
+  uniform_coarse_p: 0.10          # one scale everywhere, s ~ U{2, 4, 8}
+  budget_p: 0.55                  # thresholds calibrated to a token target, log-uniform in budget_range; the rest: random offset
+  budget_range: [0.015625, 1.0]
+  offset_range: [-1.0, 4.0]
+  random_placement_p: 0.20        # of the budget + offset examples: a synthetic detail map instead of the image's
+  smooth_scramble_frac: 0.67      # of those: blobs and spotlight / ramp (half each); the rest i.i.d.
+  pyramid_noise_std: 0.6
+  level_jitter_std: 0.75
+  coarse_cell_boost: 0.5          # coarse cells weigh 1.5x in the loss (weights normalised to mean 1 per image)
+  loss_channel_reduction: "mean"  # mean over cells and channels, as in the reference recipe ("sum": 128x the gradient)
+
+optim:
+  global_batch_size: 128          # batch_per_gpu x grad_accum x GPUs, checked at start-up
+  max_steps: 30000
+  trunk_lr: 2.0e-5
+  adapter_lr: 1.6e-4              # 8x, on scale_emb, mixers, ipe_2d, refiners
+  warmup_steps: 500               # linear from 1e-4 x the rate, then constant
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0
+  grad_clip_norm: 0.5
+  spike_guard_factor: 10.0        # skip a step whose gradient norm exceeds 10x the running mean of accepted norms
+  spike_guard_max_norm: 50.0      # ... or 50 outright, or is not finite
+  spike_guard_warmup: 50
+  ema_decay: 0.9999               # with warm-up: min(0.9999, (1 + n) / (10 + n))
+  ckpt_every: 5000                # EMA snapshot (ema-s<step>.safetensors) + the validation gallery
+
+data:
+  source_weights: {blip3o: 0.060, sharegpt4o: 0.040, dalle3: 0.016}   # sampling shares of the three sources
+
+inference:                        # also the periodic validation: 32 prompts x 10 budgets, seed 42
+  num_steps: 50
+  guidance_scale: 3.5             # the release's (config.json sampler; diffusers 0.42.1)
+  relayout_every: 4               # steps 0, 4, ..., 20; step 0 from the noise, later ones from decoded pixels
+  relayout_until: 20              # the layout of step 20 is kept to the end (null: refresh to step 48)

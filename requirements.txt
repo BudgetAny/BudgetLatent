@@ -1,0 +1,15 @@
+# Tested versions (Python 3.12, CUDA 12.8, RTX PRO 6000 Blackwell).  BFL's reference code (github.com/black-forest-labs/
+# flux2 and flux-3-image-klein, in third_party/ or FLUX2_ROOT / FLUX3_ROOT) is only read by the parity checks of tests/.
+torch==2.9.1
+torchvision==0.24.1             # scripts/data/build_mix.py
+transformers==4.57.6            # Qwen3-4B (FLUX.2) and Qwen3-VL-4B-Instruct (FLUX 3: transformers >= 4.57)
+tokenizers==0.22.2
+diffusers==0.36.0               # AutoencoderKLFlux2; Flux2Transformer2DModel as a second reference in tests/
+huggingface_hub==0.35.3
+safetensors==0.8.0
+accelerate==1.14.0
+numpy==2.2.6
+pillow==12.1.1
+pyarrow==23.0.0                 # scripts/data/build_mix.py, scripts/data/build_aesthetic.py
+pyyaml==6.0.3                   # configs/*.yaml
+# optional, tests/reference_flux3.py only (an environment of its own): diffusers==0.42.1 with transformers 5.x
